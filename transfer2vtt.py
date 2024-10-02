@@ -1,7 +1,6 @@
 import whisper
 from whisper.utils import get_writer
 
-# def transcribe(file_name, target_language):
 def transcribe(file):
     # 选择base模型
     model = whisper.load_model("base")

@@ -13,6 +13,5 @@ weights-yolov3-person/
 detections.csv
 predict_by_yolov3.py
 predict_by_yolov8.py
-json_vtt_transfer.py
 yolov3.py
 yolov8s.pt

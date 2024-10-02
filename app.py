@@ -1,45 +1,44 @@
 import json
+import subprocess
+import logging
+import time
 
-from flask import Flask, request, send_from_directory, send_file, jsonify
+from logging.handlers import RotatingFileHandler
+from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
-import os
-
-from webvtt import WebVTT
 from werkzeug.utils import secure_filename
+import pymysql
 
-import predict_by_yolov8
+# 引入字幕生成代码
 import transfer2vtt
-import predict_by_yolov3
 import pandas as pd
+# 引入处理音频代码
+import audioPreprocess
 
 # 引入自己的webvtt-py包
+from webvtt import *
+from webvtt import WebVTT
+from webvtt import webvtt
 import webvtt
-from webvtt.structures import Caption
 
-# 音频处理
-from pydub import AudioSegment
+from format_transfer import *
+
 
 # 处理视频(因为单个视频太大了,所以需要进行音视频分离)
 from moviepy.editor import *
-
-from audioPreprocess import *
 
 app = Flask(__name__)
 CORS(app)  # 这会为所有路由添加CORS支持
 
 
-# 音频转录为字幕
-# @app.route('/transcribe', methods=['POST'])
-def transfer(name):
-    # 对音频进行转录
-    # name = request.form.get('name')
-    # language = request.form.get('language')
-    print(request.form)
-    print("I am transcribing: ", name)
-    # transfer2vtt.transcribe(name, language)
-    transfer2vtt.transcribe(name)
-    return 'ok'
-    # return "{},的字幕转录成功！".format(name)
+@app.before_first_request
+def setup_logging():
+    if not app.debug:
+        file_handler = RotatingFileHandler('runtime.log', maxBytes=1024 * 1024 * 100, backupCount=10)
+        file_handler.setLevel(logging.INFO)
+        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        file_handler.setFormatter(formatter)
+        app.logger.addHandler(file_handler)
 
 
 # /: 根目录下
@@ -50,104 +49,88 @@ def index():
     return "hello world!"
 
 
-# 找到一个人的片段并且移动字幕位置
-@app.route("/findPerson", methods=['POST'])
-def findPerson():
-    video = request.form.get('name')
-    print(video)
+# @app.route("/findPerson", methods=['POST'])
+def findPerson(video):
+    """
+    自定义字幕块位置
+    """
     video_path = "./sources/" + video.split(".")[0] + "/" + video
     print(video_path)
     # video_path = "./sources/two-man-talk/two-man-talk.mp4"
-
-    # 找到一个人的片段，并且标注ta在视频中的左侧还是右侧.
-    # predict_by_yolov3.predict_go(video_path)
-    # predict_by_yolov8.doIt(video_path)
-
-    # return "ok哈哈哈哈"
     print("开始改变字幕位置了")
     # 随视频改变字幕位置
-    setCaptions(video)
-
-    # 将修改后的字幕发送给前端
-    # 假设setCaptions函数将修改后的字幕保存在同一个目录
-    print("发送")
-    subtitle_path = os.path.join("./webvtt-captions", video.split(".")[0])
-    # subtitle_path = "./webvtt-captions"
-    subtitle_filename = video.split(".")[0] + ".vtt"  # 假设的字幕文件名
-    print("subtitle_filename = ", subtitle_filename)
-    print("subtitle_path = ", subtitle_path)
-    return send_file('./webvtt-captions/' + subtitle_filename, as_attachment=True)
-    # return send_from_directory(path = './webvtt-captions',directory='./webvtt-captions', filename = subtitle_filename, as_attachment = True)
-
-    # return "自动化修改字幕successfully!"
+    json_res = setCaptions(video)
+    return json_res
 
 
-# 根据检测画面的结果来自动化设置字幕位置
 def setCaptions(video):
+    """
+    根据检测画面的结果来自动化设置字幕位置
+    """
     # 找到要更改的字幕文件
     vtt_path = "./webvtt-captions/" + video.split(".")[0] + ".vtt"
     print("vtt_path = ", vtt_path)
     # 先读取原始webvtt内容
     vtt = webvtt.read(vtt_path)
     # 读取csv文件，将内容解析出来
-    df = pd.read_csv("detections.csv", usecols=['timestamp', 'in_left', 'in_right'])
+    df = pd.read_csv("new_file.csv", usecols=['timestamp', 'in_left', 'in_right', 'line', 'position'])
     # 遍历每一行，针对每个时间戳，改变字幕位置
     for idx, row in df.iterrows():
         cur_timestamp = '0' + row['timestamp'][:-4]
         for caption in vtt.captions:
             # print(cur_timestamp, caption.start[:-4], caption.end[:-4])
             if caption.start[:-4] <= cur_timestamp <= caption.end[:-4]:
+                print("row = ", row)
                 print('找到了位置')
+                # 开始做操作了，设置line 和 position
+                caption.pos_styles['line'] = str(row['line'])[2:] + '%'
+                caption.pos_styles['position'] = str(row['position'])[2:] + '%'
                 # 在左侧
-                if row['in_left'] == 1:
-                    caption.pos_styles['align'] = 'left'
-                else:
-                    caption.pos_styles['align'] = 'right'
-
+                # if row['in_left'] == 1:
+                #     caption.pos_styles['align'] = 'left'
+                # else:
+                #     caption.pos_styles['align'] = 'right'
     # 更改完毕，将内容写回
     f = open(vtt_path, 'w', encoding='utf-8')
     vtt.write(f)
+    f.close()
 
+    time.sleep(5)
+
+
+    vtt_name = video.split(".")[0] + ".mp4"
+
+    with open(vtt_path, 'r', encoding='utf-8') as file:
+        file_content = file.read()
+
+    values = (vtt_name, file_content)
+    print("values = ", values)
+    conn = pymysql.connect(host='localhost', user='root', passwd="123456", db='promising_cinema')
+    cur = conn.cursor()
+    query = "INSERT INTO captions(video_name, content) VALUES(%s, %s)"
+    cur.execute(query, values)
+    conn.commit()
+    for r in cur:
+        print(r)
+    cur.close()
+    conn.close()
+
+
+    # 将这玩意发给前端
+    json_res = vtt_to_json(vtt_path)
     print("更改完毕")
-    # print(df)
-    return "自动化修改字幕完成."
+
+    return json_res
 
 
-# @app.route('/audioPreprocess', methods=['POST'])
-def audio_preprocess(filename):
-    # filename, extension = request.form.get('name').rsplit('.', 1)
-    # 1. 分割音频
-    print("step 1")
-    n = audio_split(filename)
-    # n = 12
-
-    # 2. 利用spleeter来提取人声
-    print("step 2")
-    vocals_separator(filename, n)
-
-    # 3. 对分离出来的人声进行降噪处理
-    print("step 3")
-    noise_filter(filename, n)
-
-    # 4. 合并
-    print("step 4")
-    combine_audio(filename, n)
-
-    return jsonify({'message': "ok！"}), 200
 
 
-@app.route('/extract_audio_from_video', methods=['POST'])
-def extract_audio_from_video():
+def extract_audio_from_video(file):
     """
-    使用moviepy从视频文件中提取音频。
-    参数:
-    video_path: 视频文件的路径。
-    audio_path: 保存提取音频的路径。
+    使用moviepy从视频文件中分离出音频
     """
-    param = request.form.get('name')
-    print("param = ", param)
-    filename, extension = param.rsplit('.', 1)
-    video_path = f"sources/{filename}/{param}"
+    filename, extension = file.rsplit('.', 1)
+    video_path = f"sources/{filename}/{file}"
     audio_path = f"sources/{filename}/{filename}.mp3"
 
     video = VideoFileClip(video_path)
@@ -156,25 +139,11 @@ def extract_audio_from_video():
     audio.close()
     video.close()
 
-    # 这里分离完成之后继续自动操作接下来的流程！！！
-
-    # audioProcess
-    audio_preprocess(filename)
-
-    # whisper 转录
-    # trans_res = transfer(filename)
-
-    # 手动去cmd中生成detections.csv,将csv放入此目录中
-
-    # findPerson自动设置字幕位置
-    # findPerson(filename)
-
-    return "ok"
-
 
 @app.route("/json2vtt", methods=["POST"])
 def json2vtt():
     """
+    ....前端用的工具函数....
     track的json文件转vtt格式
     """
     import os
@@ -187,21 +156,24 @@ def json2vtt():
     # 读取json文件内容
     content = file.read().decode('utf-8')
     data = json.loads(content)
-
+    print("type(data) = ", type(data))
     # todo 利用webvtt-py将content更改为vtt格式的文件，然后发送给请求端
     vtt = WebVTT()
     # captions = []
 
     for dict_item in data:
         if 'base_info' in dict_item:
+            print("有base_info在")
             base_info_dict = dict_item['base_info']
         if 'captions' in dict_item:
+            print("有captions在")
             captions_list = dict_item['captions']
     # frameCount = base_info_dict['frameCount']
     video_name = base_info_dict['video_name']
-    fps = base_info_dict['fps']
+    # fps = base_info_dict['fps']
     video_width = base_info_dict['width']
     # 遍历 captions 数据, 创建字幕块，
+    fps = 30
     for i, caption in enumerate(captions_list):
         left = caption['left']
         # 得到起止时间戳
@@ -237,16 +209,17 @@ def json2vtt():
 @app.route("/vtt2json", methods=["POST"])
 def vtt2json():
     """
-    vtt格式文件转track的json形式
+    vtt格式文件转track的json形式, 返回给前端
     """
+    print("开始进行vtt转json")
     import os
     # 检查是否有文件在请求中
-    if 'file' not in request.files:
-        return 'No file part in the request'
+    # if 'file' not in request.files:
+    #     return 'No file part in the request'
     file = request.files["file"]
     if file.filename == "":
         return "No file selected for upload"
-
+    print("file = ", file, " filename = ", file.filename)
     filename = secure_filename(file.filename)
     relative_path = 'uploads'  # 你的相对路径
     current_directory = os.path.dirname(os.path.realpath(__file__))
@@ -258,7 +231,7 @@ def vtt2json():
 
     vtt = webvtt.read(filepath)
 
-    # todo 将vtt内容转换为json格式文件，返回给前端，前端对文件进行解析，将字幕文件添加到音轨
+    # todo 这里fps待定
     fps = 30
     info_list = []
     for caption in vtt.captions:
@@ -277,15 +250,8 @@ def vtt2json():
     # 将信息列表转化为 JSON 格式的字符串
 
     full_info = {'captions': info_list}
+    print("vtt转json成功，发送给前端")
     return jsonify(full_info)
-
-    # # 将 JSON 格式的字符串保存到文件
-    # with open('vtt2jsonfile.json', 'w') as json_file:
-    #     json_file.write(info_json)
-    #
-    #
-    #
-    # return "收到啦"
 
 
 def frame_to_timestamp(frame, fps):
@@ -311,7 +277,65 @@ def time_to_frames(time, fps):
     frames = int(sec * fps)
     return frames
 
+@app.route("/give_me_track_text_json", methods=["POST"])
+def give_me_track_text_json():
+    file = request.form.get('name')
+    filename, extension = file.rsplit('.', 1)
+
+
+
+@app.route("/give_me_captions", methods=["POST"])
+def make_captions():
+    # try:
+    # 一. 获取前端想要处理的视频
+    file = request.form.get('name')
+    filename, extension = file.rsplit('.', 1)
+    app.logger.info("要处理的视频是：" + file)
+
+    # 二. 开始处理, 初步得到没有处理过的字幕文件
+    #   1. 分离出视频与音频
+    extract_audio_from_video(file)
+    app.logger.info(file + "分离完成")
+    #   2. 对音频进行预处理(分离人声、降噪处理)
+    audioPreprocess.audio_preprocess(filename)
+    app.logger.info("分离人声，降噪完成")
+    #   3. 开始转录
+    transfer2vtt.transcribe(filename)
+    app.logger.info("转录完成")
+
+    # 三. 深度处理, 得到处理过的字幕文件
+    #   1. 通过TalkNet模型, 识别出说话人, 记录说话人位置信息
+    # 确保talknet目录下demo文件夹内有视频文件, 然后在talknet目录下执行
+    # python demoTalkNet.py --videoName two-man-talk
+    #   1.1 确保talknet项目中有对应的视频文件
+    # cmd = (
+    #         "d: "
+    #         "&& "
+    #         "cd D:\\code\\promising-video\\speaker-dection\\TalkNet-ASD-main "
+    #         "&& "
+    #         "activate talknet "
+    #         "&& "
+    #         "python demoTalkNet.py --videoName " + filename
+    # )
+    # output = subprocess.call(cmd, shell=True, stdout=None)
+    app.logger.info("说话人识别完成")
+    #   2. 通过说话人位置信息, 自动化设置字幕位置, 并将字幕返回给前端
+    json_res = findPerson(file)
+
+    need_send_file_path = './webvtt-captions/' + filename + '.vtt'
+
+    return send_file(need_send_file_path, as_attachment=True)
+
+
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    # 对于我们没有明确处理的异常，我们将其记录到日志中
+    app.logger.error('An error occurred: %s' % e)
+    return '抱歉，发生了异常: ' + str(e), 500
+
 
 # 大坑，这个东西要放到所有函数下面，要不然它下面的函数就不会被执行
 if __name__ == "__main__":
+    logging.basicConfig(filename='demo.log', level=logging.INFO)
     app.run()

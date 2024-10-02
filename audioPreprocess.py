@@ -1,15 +1,11 @@
 import os
 import subprocess
-
-from pydub import AudioSegment
-from spleeter.separator import Separator
-from multiprocessing import freeze_support
-
 import numpy as np
 import scipy.io.wavfile as wavfile
-from scipy import signal
 
-import tqdm
+from pydub import AudioSegment
+from multiprocessing import freeze_support
+from scipy import signal
 from tqdm._tqdm import trange
 
 
@@ -122,3 +118,31 @@ def noise_filter(audio_name, n):
         print("out = ", output_file_path)
         wavfile.write(output_file_path, sample_rate, filtered_data)
     print("降噪完成.")
+
+
+"""
+入口函数
+"""
+def audio_preprocess(filename):
+    """
+    处理音频文件: 分离出人声，降噪处理
+    """
+    # 1. 分割音频
+    print("step 1")
+    n = audio_split(filename)
+    # n = 12
+
+    # 2. 利用spleeter来提取人声
+    print("step 2")
+    vocals_separator(filename, n)
+
+    # 3. 对分离出来的人声进行降噪处理
+    print("step 3")
+    noise_filter(filename, n)
+
+    # 4. 合并
+    print("step 4")
+    combine_audio(filename, n)
+
+    # return jsonify({'message': "ok！"}), 200
+    return "ok"
